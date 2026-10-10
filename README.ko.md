@@ -116,6 +116,7 @@ watcher는 레인을 닫을 때 셸 없이 이 확인을 직접 다시 돌리고
 |---|---|
 | `dori launch <key> ...` | brief에 레인 footer를 쓰고, 탭을 열고, 에이전트를 시작하고, 시작 오류를 확인 |
 | `dori adopt <key> --pane ID ...` | 이미 돌고 있는 레인을 등록 |
+| `dori launch <key> --host NAME ...` / `dori hosts check` | 다른 머신에서 SSH로 레인을 돌리고 로컬 레인처럼 추적. 호스트에 닿는지 확인 |
 | `dori sync [--write]` | 레지스트리와 실제 pane 비교, 어긋난 곳 표시 |
 | `dori claim-done` / `object-done` / `close` | 완료 흐름 |
 | `dori pause` / `resume` | 소유자가 기다리라고 할 때: 깨우지 않고, 목표를 멈추고, 진행 중인 턴을 멈춤. 그리고 재개 |

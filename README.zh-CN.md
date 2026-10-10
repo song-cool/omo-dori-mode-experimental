@@ -116,6 +116,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 |---|---|
 | `dori launch <key> ...` | 在 brief 里写入 lane footer,打开标签页，启动智能体，检查启动错误 |
 | `dori adopt <key> --pane ID ...` | 登记一条已经在运行的 lane |
+| `dori launch <key> --host NAME ...` / `dori hosts check` | 通过 SSH 在另一台机器上运行 lane,像本地 lane 一样跟踪;检查各主机是否可达 |
 | `dori sync [--write]` | 对照登记表和实际 pane,列出不一致 |
 | `dori claim-done` / `object-done` / `close` | 完成流程 |
 | `dori pause` / `resume` | 所有者说"等一下"时:不再提醒、暂停目标、停止正在运行的回合;以及恢复 |

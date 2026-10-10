@@ -12,6 +12,7 @@ import { pauseLane, resumeLane } from "./pause.ts";
 import { Registry, statusOf } from "./registry.ts";
 import { realClock, run } from "./run.ts";
 import { syncRegistry } from "./sync.ts";
+import { checkHost, hostGuard, HostError, runnerOnHost } from "./remote.ts";
 import { canLaunch } from "./routing.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
@@ -25,7 +26,8 @@ import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 
 const USAGE = `dori <command> [options]
 
-  launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
+  launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR] [--host NAME] [--agent NAME]
+                                       --host runs the lane on a config.hosts machine over SSH; --agent picks agentCommands.NAME
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
   sync   [--write]                     registry vs live panes; read-only unless --write
   claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID
@@ -38,7 +40,8 @@ const USAGE = `dori <command> [options]
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
   heavy <label> -- <command ...>       run a heavy command when a slot is free and load is low
-  can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
+  can-launch [--host NAME]             exit 0 if the host has room for a new lane, else print why and exit 4
+  hosts check                          print HOST_OK <name> or HOST_DOWN <name> <reason> for each config.hosts entry
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
   presence <slack|discord>             keep the account shown as online until stopped
@@ -63,7 +66,7 @@ const flags = parseArgs({
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
     model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
-    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
+    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, host: { type: "string" }, agent: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -92,8 +95,8 @@ const every = async (minutes: number, tick: () => Promise<void>): Promise<void> 
 try {
   switch (command) {
     case "launch": {
-      const r = await launchLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd") });
-      console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}`);
+      const r = await launchLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd"), host: opt("host"), agent: opt("agent") });
+      console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}${r.lane.host ? ` host=${r.lane.host}` : ""}`);
       console.log(r.startup);
       process.exit(r.startup.startsWith("STARTUP_OK") ? 0 : 3);
     }
@@ -146,7 +149,8 @@ try {
       const seen = new Set<string>();
       const paneState = newDeadPaneState();
       await every(loopMin, async () => {
-        for (const line of await deadPaneTick(run, config, seen, new Date().toISOString().slice(0, 13), paneState)) console.log(line);
+        const remote = { lanes: (await deps.registry.open()).filter((l) => l.host), runnerOn: (h: string) => runnerOnHost(deps, h) };
+        for (const line of await deadPaneTick(run, config, seen, new Date().toISOString().slice(0, 13), paneState, remote)) console.log(line);
       });
       break;
     }
@@ -174,9 +178,25 @@ try {
       break;
     }
     case "can-launch": {
-      const v = canLaunch(await sampleHost(run), config.guard);
-      console.log(v.ok ? "CAN_LAUNCH" : `HOLD ${v.reasons.join(" | ")}`);
+      const host = opt("host");
+      if (host) {
+        const status = await checkHost(deps, host);
+        if (!status.ok) {
+          console.log(`HOLD host ${host} unreachable: ${status.line.replace(/^HOST_DOWN \S+ /, "")}`);
+          process.exit(4);
+        }
+      }
+      const v = canLaunch(await sampleHost(host ? runnerOnHost(deps, host) : run), host ? hostGuard(config, host) : config.guard);
+      console.log(v.ok ? `CAN_LAUNCH${host ? ` ${host}` : ""}` : `HOLD ${host ? `${host}: ` : ""}${v.reasons.join(" | ")}`);
       process.exit(v.ok ? 0 : 4);
+    }
+    case "hosts": {
+      if (key !== "check") die("usage: dori hosts check");
+      const names = Object.keys(config.hosts);
+      if (!names.length) die("no hosts in config.hosts");
+      const results = await Promise.all(names.map((n) => checkHost(deps, n)));
+      for (const r of results) console.log(r.line);
+      process.exit(results.every((r) => r.ok) ? 0 : 5);
     }
     case "send": {
       const platform = key ?? die("send needs slack, telegram or discord");
@@ -244,6 +264,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
+  if (e instanceof LaunchError || e instanceof HostError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
   throw e;
 }

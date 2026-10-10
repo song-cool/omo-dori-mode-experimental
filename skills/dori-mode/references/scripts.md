@@ -1,6 +1,6 @@
 # Scripts
 
-`scripts/` is a bun + TypeScript package with one CLI, `dori`. Every external command runs as an argv array; nothing builds a shell string.
+`scripts/` is a bun + TypeScript package with one CLI, `dori`. Every external command runs as an argv array. The one exception is a lane on a remote host: SSH hands the remote side a single string, so `src/remote.ts` builds it by quoting every argument for a POSIX shell (`export PATH=...; cd <cwd> && exec <quoted argv>`). The tests run that string through real `sh` and `zsh` to prove it keeps every argument intact.
 
 ## Install and test
 
@@ -34,6 +34,44 @@ Needs: bun 1.3+, herdr, git, and the GitHub CLI (`gh`) for `merged`/`closed` sig
 | `guard` | load 150/80, 20% memory, 50 GB disk, 20 panes | `guard` |
 | `hooks.threadReply`, `hooks.threadDone` | none | `freshness`, `close` |
 | `hooks.transcribe` | none | `transcribe` (argv with `{file}`, prints the text) |
+| `agentCommands` | none | `launch --agent NAME` on this machine: named argv templates, for example `codex` or `claude` |
+| `hosts` | none | machines that run lanes over SSH; see below |
+
+### `hosts`: lanes on another machine
+
+Each entry names a machine the lead reaches with key-based SSH (`ssh -o BatchMode=yes`). Paths are on that machine and must be absolute.
+
+```json
+"hosts": {
+  "buildbox": {
+    "ssh": "me@buildbox.example",
+    "herdr": "/home/me/.local/bin/herdr",
+    "herdrSession": "dori-lanes",
+    "laneWorkspace": "lanes",
+    "defaultCwd": "/home/me/code",
+    "briefsDir": "/home/me/.dori/briefs",
+    "sessionsDir": "/home/me/.omo/agent/sessions",
+    "agentCommand": ["/home/me/.dori/bin/omo-interactive", "{model}", "{prompt}"],
+    "agentCommands": { "codex": ["/opt/homebrew/bin/codex", "{prompt}"], "claude": ["/home/me/.local/bin/claude", "{prompt}"] },
+    "defaultModel": "anthropic/claude-opus-5-5"
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ssh` | required | the SSH target |
+| `herdr` | `herdr` | herdr binary on the host |
+| `herdrSession` | none | run the host's lanes in this named herdr session (its own server and socket), so they never mix with the owner's own herdr session there. `launch` starts that server headless if it is not running |
+| `laneWorkspace` | first workspace | workspace id or label; created by label when missing |
+| `defaultCwd` | none | where lanes start, and the repo whose worktrees they own |
+| `briefsDir` | required for `launch --host` | where the brief (`<key>.md`) and the done claim (`<key>.done`) live |
+| `sessionsDir` | none | session-id lookup on the host |
+| `agentCommand`, `agentCommands`, `defaultModel` | the top-level values | what `launch` starts there |
+| `path` | `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, `/usr/local/bin` | put in front of `PATH`, because non-interactive SSH has a minimal one |
+| `guard` | top-level `guard` | thresholds for `can-launch --host` |
+
+Every herdr call for a remote lane (read, send, process-info, close), its git checks and its `command` and `file` signals run on the host over SSH. `merged`, `closed`, `published` and `url` signals and the thread hooks stay on the lead's machine. A remote lane cannot reach the lead's pane, so its footer tells it to print `[REPORT]` lines in its own pane (which `freshness` reads over SSH) and to claim done by writing its evidence to `<briefsDir>/<key>.done`, which `watch` pulls, removes and records as the claim.
 
 Hooks are argv templates for your messenger CLI. `{thread}`, `{text}` and `{key}` are filled into each argument separately, so the text stays one argument whatever it contains.
 
@@ -57,14 +95,16 @@ Every module takes its HTTP, clock and timers as arguments. That is how the test
 
 ## Commands
 
-### `dori launch <key> --title T --brief FILE --done "..." [--thread REF] [--model M] [--cwd DIR]`
-Opens a lane: appends the footer to the brief, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane, `STARTUP_OK` only when herdr reports the agent idle or working, and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`.
+### `dori launch <key> --title T --brief FILE --done "..." [--thread REF] [--model M] [--cwd DIR] [--host NAME] [--agent NAME]`
+Opens a lane: appends the footer to the brief, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane, `STARTUP_OK` only when herdr reports the agent idle or working, and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`. On a host the status comes from that host's herdr.
+
+`--host NAME` does all of it on a `hosts` machine: the brief (with the remote footer) is copied to `<briefsDir>/<key>.md` there, the tab opens in that host's herdr, and the registry records `host` and `claimFile`. An unreachable host fails before anything is registered. `--agent NAME` starts `agentCommands.NAME` (the host's, with `--host`) instead of `agentCommand`.
 
 ### `dori adopt <key> --pane ID --title T --brief FILE --done "..." [--thread REF]`
 Registers a lane that is already running.
 
 ### `dori sync [--write]`
-Prints `key | thread | pane | session | status` for every open lane and every unregistered agent pane, followed by drift. Read-only unless `--write`, which stores session ids.
+Prints `key | thread | pane | session | status` for every open lane and every unregistered agent pane, followed by drift. A remote lane's pane reads as `<host>/<pane>`; an unreachable host is drift, not an error. Unregistered panes are only listed on this machine. Read-only unless `--write`, which stores session ids.
 
 ### `dori claim-done [<key>] --evidence TEXT` / `dori object-done <key> --reason TEXT ...`
 The two halves of the done flow. Both message the lane's pane and check that Enter registered.
@@ -82,19 +122,22 @@ A paused lane is skipped by `freshness`: no nudge, no post. Only `dori resume` e
 Both print `PAUSED` / `RESUMED` and exit 0 on success. A lane in any other state is refused (`NOT_PAUSED` / `NOT_RESUMED`, exit 2), and a second `pause` is a no-op. `claim-done` and `object-done` on a paused lane move it out of `paused` in the registry while its goal stays paused.
 
 ### `dori watch`
-Runs forever. Every 30 seconds it prints each new claim once (`LANE_DONE_CLAIMED`). Claims older than `closeAfterMin` are settled: unpushed or uncommitted work and failing signals turn into objections (`LANE_NOT_DONE`); otherwise the lane is closed (`LANE_CLOSED`). The deadline lives in the registry, so a restart picks up where it left off.
+Runs forever. Every 30 seconds it first pulls done claims that remote lanes wrote to their claim file, then prints each new claim once (`LANE_DONE_CLAIMED`). Claims older than `closeAfterMin` are settled: unpushed or uncommitted work and failing signals turn into objections (`LANE_NOT_DONE`); otherwise the lane is closed (`LANE_CLOSED`). The deadline lives in the registry, so a restart picks up where it left off.
 
 ### `dori freshness [--loop MIN]`
 For working lanes that have gone quiet: a nudge in the pane after `nudgeAfterMin`, then the lane's last `[REPORT]` line posted to its thread after `postAfterMin`, with home paths and pane ids scrubbed. Each happens once per silence. The line is posted only once it is still the last `[REPORT]` line on the next tick (`PENDING-REPORT` the first time) and differs from the line posted last time (`STALE-REPORT` otherwise). A held-back outcome is printed once per change, not on every tick. A nudge reports its delivery as `delivered` (the agent status moved to working) or `unconfirmed`.
 
 ### `dori dead-panes [--loop MIN]`
-Prints `DEAD_PANE <id>` once per hour for a pane with no running agent status whose last lines match `deadPanePatterns` on two ticks in a row with the same text. A pane herdr reports as idle, working, blocked or done is never dead. A pane that is neither is unrecognised; three unrecognised ticks in a row print `UNRECOGNISED_PANE <id> ...` once (list non-agent panes in `ignorePanes`).
+Prints `DEAD_PANE <id>` once per hour for a pane with no running agent status whose last lines match `deadPanePatterns` on two ticks in a row with the same text. A pane herdr reports as idle, working, blocked or done is never dead. A pane that is neither is unrecognised; three unrecognised ticks in a row print `UNRECOGNISED_PANE <id> ...` once (list non-agent panes in `ignorePanes`). On remote hosts only the panes of open registered lanes are checked, by the same rules against that host's herdr, and they print as `<host>/<pane>`; a host that cannot be reached is skipped for that tick, never reported dead.
 
 ### `dori guard [--loop MIN]`
 Prints `HOST_GUARD ALERT <reasons>` when load, free memory, free disk or the pane count crosses its threshold, and `HOST_GUARD CLEAR` when it recovers. It also prints `COMPUTE_READY` / `COMPUTE_BUSY` as load crosses `loadOk`. Only changes are printed.
 
-### `dori can-launch`
-Prints `CAN_LAUNCH` and exits 0 when the host has room for another lane. Otherwise it prints `HOLD <reasons>` and exits 4. The reasons come from the guard's memory, disk and pane-count thresholds. CPU load alone never holds a launch, because it moves too fast to plan around.
+### `dori hosts check`
+Prints `HOST_OK <name> herdr <version> server=up|down` or `HOST_DOWN <name> <reason>` (SSH unreachable, herdr not runnable) for every `hosts` entry. Exit 5 if any host is down. `server=down` is fine: `launch` starts the server.
+
+### `dori can-launch [--host NAME]`
+Prints `CAN_LAUNCH` and exits 0 when the host has room for another lane. With `--host`, it checks that machine over SSH, and an unreachable host (asleep, offline) prints `HOLD host <name> unreachable: <reason>` so the lead can queue the work and tell the owner. Otherwise it prints `HOLD <reasons>` and exits 4. The reasons come from the guard's memory, disk and pane-count thresholds. CPU load alone never holds a launch, because it moves too fast to plan around.
 
 ### `dori send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]`
 Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN` (plus `DORI_SLACK_COOKIE` for a user token), `DORI_TELEGRAM_TOKEN` or `DORI_DISCORD_TOKEN`. Text containing `$(` is refused, since it can only come from a shell string. Rate limits are retried with the server's wait time; other errors fail at once.

@@ -116,6 +116,7 @@ watcher はレーンを閉じるときに、シェルを通さずこの確認を
 |---|---|
 | `dori launch <key> ...` | brief にレーンの footer を書き、タブを開き、エージェントを起動し、起動エラーを確認 |
 | `dori adopt <key> --pane ID ...` | すでに動いているレーンを登録 |
+| `dori launch <key> --host NAME ...` / `dori hosts check` | 別のマシンで SSH 越しにレーンを動かし、ローカルのレーンと同じように追跡。ホストに届くか確認 |
 | `dori sync [--write]` | レジストリと実際の pane を比べ、ずれを表示 |
 | `dori claim-done` / `object-done` / `close` | 完了フロー |
 | `dori pause` / `resume` | オーナーが「待って」と言ったとき: 声かけなし、ゴール一時停止、実行中のターンを止める。そして再開 |

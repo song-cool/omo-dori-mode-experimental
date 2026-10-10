@@ -31,7 +31,12 @@ const descendants = (table: readonly Proc[], root: number): Proc[] => {
 
 export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
 
-export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly listDir?: (dir: string) => readonly string[] };
+export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly listDir?: (dir: string) => readonly string[] | Promise<readonly string[]> };
+
+export const remoteListDir = (run: Runner) => async (dir: string): Promise<readonly string[]> => {
+  const r = await run(["ls", dir]);
+  return r.code === 0 ? r.out.split("\n").filter(Boolean) : [];
+};
 
 export const resolveSession = async (pane: string, cwd: string, table: readonly Proc[], deps: SessionDeps): Promise<SessionHit> => {
   const info = await deps.run(["herdr", "pane", "process-info", "--pane", pane]);
@@ -50,7 +55,7 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   const started = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
   if (Number.isNaN(started)) return { id: "", via: "none", pid: agent.pid };
   const list = deps.listDir ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
-  const near = list(sessionDirFor(deps.sessionsDir, cwd)).flatMap((name) => {
+  const near = (await list(sessionDirFor(deps.sessionsDir, cwd))).flatMap((name) => {
     const m = SESSION_FILE.exec(name);
     const at = m ? Date.parse(`${m[1]}:${m[2]}:${m[3]}.${m[4]}Z`) : Number.NaN;
     return m?.[5] && at >= started - 5_000 && at <= started + START_WINDOW_MS ? [{ id: m[5], at }] : [];

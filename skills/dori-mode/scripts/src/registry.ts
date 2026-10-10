@@ -12,6 +12,8 @@ export type Lane = {
   readonly key: string;
   readonly title: string;
   readonly thread: string;
+  readonly host?: string;
+  readonly claimFile?: string;
   readonly pane?: string;
   readonly tab?: string;
   readonly session?: string;
@@ -87,6 +89,6 @@ export class Registry {
   }
 
   async byPane(pane: string): Promise<Lane | null> {
-    return (await this.open()).find((l) => l.pane === pane) ?? null;
+    return (await this.open()).find((l) => !l.host && l.pane === pane) ?? null;
   }
 }

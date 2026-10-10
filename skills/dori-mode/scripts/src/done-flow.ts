@@ -4,6 +4,7 @@ import { type DoriConfig, fill } from "./config.ts";
 import { type Lane, type Registry, statusOf, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
 import { sendVerified } from "./panes.ts";
+import { hostOf, remotePathExists, runnerFor } from "./remote.ts";
 import { checkDone, type SignalIo } from "./signals.ts";
 
 export type FlowDeps = {
@@ -13,9 +14,26 @@ export type FlowDeps = {
   readonly config: DoriConfig;
   readonly exists?: (path: string) => boolean;
   readonly signalIo?: SignalIo;
+  readonly hostRunner?: (name: string) => Runner;
 };
 
-const signalIo = (deps: FlowDeps, lane: Lane): SignalIo => ({ cwd: lane.cwd ?? deps.config.defaultCwd, ...deps.signalIo });
+const laneRoot = (deps: FlowDeps, lane: Lane): string => lane.cwd ?? (lane.host ? (hostOf(deps.config, lane.host).defaultCwd ?? "") : deps.config.defaultCwd);
+
+const signalIo = (deps: FlowDeps, lane: Lane): SignalIo => ({ cwd: laneRoot(deps, lane), ...(lane.host ? { exec: runnerFor(deps, lane) } : {}), ...deps.signalIo });
+
+const pathExists = (deps: FlowDeps, lane: Lane): ((path: string) => Promise<boolean>) => {
+  if (lane.host) {
+    const remote = runnerFor(deps, lane);
+    return (path) => remotePathExists(remote, path);
+  }
+  const exists = deps.exists ?? existsSync;
+  return async (path) => exists(path);
+};
+
+const extraRoots = (deps: FlowDeps, lane: Lane): string[] => {
+  const root = lane.host ? hostOf(deps.config, lane.host).defaultCwd : deps.config.defaultCwd;
+  return root ? [root] : [];
+};
 
 const windowMs = (deps: FlowDeps): number => deps.config.closeAfterMin * 60_000;
 
@@ -24,7 +42,7 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string): P
   await deps.registry.write(withStatus(lane, "done-claimed", evidence, at, { claim: { at, evidence, emitted: false } }));
   if (lane.pane) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
-    await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`);
+    await sendVerified(runnerFor(deps, lane), deps.clock, lane.pane, `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`);
   }
   return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}`;
 };
@@ -32,7 +50,7 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string): P
 export const objectDone = async (deps: FlowDeps, lane: Lane, reasons: readonly string[]): Promise<string> => {
   const at = iso(deps.clock);
   await deps.registry.write(withStatus(lane, "not-done", reasons.join("; "), at, { objection: { at, reasons } }));
-  if (lane.pane) await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] not done: ${reasons.join("; ")}; keep working, claim again when fixed`);
+  if (lane.pane) await sendVerified(runnerFor(deps, lane), deps.clock, lane.pane, `[LEAD] not done: ${reasons.join("; ")}; keep working, claim again when fixed`);
   return `LANE_NOT_DONE ${lane.key} ${reasons.join("; ")}`;
 };
 
@@ -52,12 +70,13 @@ export const discoverWorktrees = async (lane: Lane, run: Runner, extraRoots: rea
 };
 
 export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]> => {
-  const exists = deps.exists ?? existsSync;
+  const run = runnerFor(deps, lane);
+  const exists = pathExists(deps, lane);
   const reasons: string[] = [];
-  for (const wt of await discoverWorktrees(lane, deps.run, [deps.config.defaultCwd])) {
-    if (!exists(wt)) continue;
-    const dirty = await deps.run(["git", "-C", wt, "status", "--porcelain", "--untracked-files=no"]);
-    const ahead = await deps.run(["git", "-C", wt, "rev-list", "--count", "HEAD", "--not", "--remotes"]);
+  for (const wt of await discoverWorktrees(lane, run, extraRoots(deps, lane))) {
+    if (!(await exists(wt))) continue;
+    const dirty = await run(["git", "-C", wt, "status", "--porcelain", "--untracked-files=no"]);
+    const ahead = await run(["git", "-C", wt, "rev-list", "--count", "HEAD", "--not", "--remotes"]);
     if (dirty.code !== 0 || ahead.code !== 0) reasons.push(`unpushed work in ${wt} (git state unreadable)`);
     else if (dirty.out.trim() || Number(ahead.out.trim()) > 0) reasons.push(`unpushed work in ${wt}`);
   }
@@ -65,7 +84,8 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
 };
 
 export const closeLane = async (deps: FlowDeps, lane: Lane, note: string): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
-  const exists = deps.exists ?? existsSync;
+  const run = runnerFor(deps, lane);
+  const exists = pathExists(deps, lane);
   const checks = await checkDone(lane.done, deps.run, signalIo(deps, lane));
   const lines = checks.map((c) => `SIGNAL ${c.ok ? "OK " : "NOT"} ${c.signal} -> ${c.detail}`);
   if (checks.some((c) => !c.ok)) return { closed: false, lines: [...lines, `REFUSED ${lane.key}: a Done signal is not live`] };
@@ -75,11 +95,13 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string): Promi
     const r = await deps.run(fill(hook, { thread: lane.thread, text: note, key: lane.key }));
     cleanup.push(r.code === 0 ? "thread marked done" : `thread hook failed: ${r.err.slice(0, 160)}`);
   }
-  if (lane.tab) cleanup.push((await deps.run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab} closed` : `tab ${lane.tab} not closed`);
-  else if (lane.pane) cleanup.push((await deps.run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane} closed` : `pane ${lane.pane} not closed`);
-  const root = lane.cwd ?? deps.config.defaultCwd;
-  for (const wt of (await discoverWorktrees(lane, deps.run, [deps.config.defaultCwd])).filter(exists)) {
-    const r = await deps.run(["git", "-C", root, "worktree", "remove", wt]);
+  const where = lane.host ? ` on ${lane.host}` : "";
+  if (lane.tab) cleanup.push((await run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab}${where} closed` : `tab ${lane.tab}${where} not closed`);
+  else if (lane.pane) cleanup.push((await run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane}${where} closed` : `pane ${lane.pane}${where} not closed`);
+  const root = laneRoot(deps, lane);
+  for (const wt of await discoverWorktrees(lane, run, extraRoots(deps, lane))) {
+    if (!(await exists(wt))) continue;
+    const r = await run(["git", "-C", root, "worktree", "remove", wt]);
     cleanup.push(r.code === 0 ? `worktree ${wt} removed` : `worktree ${wt} kept: ${r.err.slice(0, 120)}`);
   }
   const at = iso(deps.clock);
@@ -100,8 +122,25 @@ const settle = async (deps: FlowDeps, lane: Lane, evidence: string): Promise<str
   return `LANE_CLOSED ${lane.key} ${result.lines.at(-1)?.split(" ").slice(2).join(" ") ?? ""}`;
 };
 
+// A remote lane cannot reach the lead, so it claims by writing its evidence to claimFile on its host; the lead pulls it here.
+export const pullRemoteClaims = async (deps: FlowDeps): Promise<string[]> => {
+  const out: string[] = [];
+  for (const lane of await deps.registry.open()) {
+    if (!lane.host || !lane.claimFile || (statusOf(lane) !== "working" && statusOf(lane) !== "not-done")) continue;
+    const remote = runnerFor(deps, lane);
+    const r = await remote(["cat", lane.claimFile]);
+    const evidence = r.code === 0 ? r.out.replace(/\s+/g, " ").trim() : "";
+    if (!evidence) continue;
+    await remote(["rm", "-f", lane.claimFile]);
+    await claimDone(deps, lane, evidence);
+    out.push(`LANE_REMOTE_CLAIM ${lane.key} ${lane.host}`);
+  }
+  return out;
+};
+
 export const watchTick = async (deps: FlowDeps): Promise<string[]> => {
   const out: string[] = [];
+  await pullRemoteClaims(deps).catch((e: unknown) => out.push(`LANE_WATCH_WARN remote claims: ${String(e).slice(0, 200)}`));
   for (const listed of await deps.registry.list()) {
     if (statusOf(listed) !== "done-claimed" || !listed.claim) continue;
     let lane = listed;

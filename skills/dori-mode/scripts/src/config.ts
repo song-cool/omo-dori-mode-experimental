@@ -17,6 +17,22 @@ export type GuardThresholds = {
   readonly panesMax: number;
 };
 
+// A machine that runs lanes over SSH. Paths are on that machine and must be absolute.
+export type HostConfig = {
+  readonly ssh: string;
+  readonly herdr?: string;
+  readonly herdrSession?: string;
+  readonly agentCommand?: ArgvTemplate;
+  readonly agentCommands?: Readonly<Record<string, ArgvTemplate>>;
+  readonly defaultModel?: string;
+  readonly laneWorkspace?: string;
+  readonly defaultCwd?: string;
+  readonly sessionsDir?: string;
+  readonly briefsDir?: string;
+  readonly path?: readonly string[];
+  readonly guard?: Partial<GuardThresholds>;
+};
+
 export type DoriConfig = {
   readonly stateDir: string;
   readonly laneWorkspace: string;
@@ -36,6 +52,8 @@ export type DoriConfig = {
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
   readonly hooks: Hooks;
+  readonly agentCommands?: Readonly<Record<string, ArgvTemplate>>;
+  readonly hosts: Readonly<Record<string, HostConfig>>;
 };
 
 export const defaultConfig = (home = homedir()): DoriConfig => ({
@@ -57,6 +75,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},
+  hosts: {},
 });
 
 export const configPath = (): string => process.env.DORI_CONFIG ?? join(homedir(), ".dori", "config.json");
@@ -67,7 +86,7 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   const base = defaultConfig(home);
   const file = Bun.file(path);
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
-  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks } };
+  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, hosts: { ...raw.hosts } };
   return {
     ...merged,
     stateDir: expandHome(process.env.DORI_STATE_DIR ?? merged.stateDir, home),

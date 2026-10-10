@@ -3,6 +3,7 @@ import type { FlowDeps } from "./done-flow.ts";
 import { checkPausedLane } from "./pause.ts";
 import { readScreen, sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
+import { runnerFor } from "./remote.ts";
 
 export const lastReportLine = (screen: string, key: string): string | null => {
   const grammar = new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| (milestone|blocker|question|done) \\| (?!<what)\\S`);
@@ -39,16 +40,17 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     if (statusOf(lane) !== "working" || !lane.pane) continue;
     const heard = lastHeard(lane);
     const silentMin = Math.round((now - heard) / 60_000);
+    const run = runnerFor(deps, lane);
     let current = lane;
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {
-      const delivery = await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] your work thread has had no update for ${silentMin} min. Post a 1-2 sentence progress line (done since last, next) and keep its status true.`);
+      const delivery = await sendVerified(run, deps.clock, lane.pane, `[LEAD] your work thread has had no update for ${silentMin} min. Post a 1-2 sentence progress line (done since last, next) and keep its status true.`);
       current = { ...current, lastNudgeAt: now };
       await deps.registry.write(current);
       acts.push({ kind: "nudged", lane: lane.key, detail: `${silentMin} min silent, delivery ${delivery}` });
     }
     const hook = deps.config.hooks.threadReply;
     if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
-      const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
+      const report = lastReportLine(await readScreen(run, lane.pane, 200), lane.key);
       // The two reads are a full loop interval apart: a line counts only once it is still there on the next tick.
       const seenBefore = current.lastSeenReport;
       current = { ...current, lastSeenReport: report ?? undefined };

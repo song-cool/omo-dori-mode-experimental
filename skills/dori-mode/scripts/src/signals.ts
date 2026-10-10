@@ -13,7 +13,8 @@ export type Signal =
   | { readonly kind: "file"; readonly path: string; readonly sha256?: string; readonly json?: { readonly path: readonly (string | number)[]; readonly value: unknown } }
   | { readonly kind: "url"; readonly url: string; readonly status: number; readonly body?: RegExp };
 
-export type SignalIo = { readonly http?: Http; readonly cwd?: string; readonly home?: string };
+// exec runs the signals that belong to the lane's machine (command, file); gh, npm and url stay on the lead's runner.
+export type SignalIo = { readonly http?: Http; readonly cwd?: string; readonly home?: string; readonly exec?: Runner };
 
 export const COMMAND_TIMEOUT_MS = 120_000;
 
@@ -193,12 +194,13 @@ export const checkSignal = async (signal: string, run: Runner, io: SignalIo = {}
       return { signal: s, ok, detail: ok ? `registry has ${sig.pkg}@${sig.version}` : r.err || r.out || "not published" };
     }
     case "command": {
-      const r = await run(sig.argv, { ...(io.cwd ? { cwd: io.cwd } : {}), timeoutMs: COMMAND_TIMEOUT_MS });
+      const r = await (io.exec ?? run)(sig.argv, { ...(io.cwd ? { cwd: io.cwd } : {}), timeoutMs: COMMAND_TIMEOUT_MS });
       if (r.code !== 0) return { signal: s, ok: false, detail: `exit ${r.code}: ${short(r.err || r.out) || "no output"}` };
       if (sig.stdout && !sig.stdout.test(r.out)) return { signal: s, ok: false, detail: `exit 0 but stdout does not match ${sig.stdout}: ${short(r.out) || "(empty)"}` };
       return { signal: s, ok: true, detail: sig.stdout ? `exit 0, stdout matches ${sig.stdout}` : "exit 0" };
     }
     case "file": {
+      if (io.exec) return checkRemoteFile(s, sig, io.exec, io.cwd);
       const path = resolvePath(sig.path, io);
       const f = Bun.file(path);
       if (!(await f.exists())) return { signal: s, ok: false, detail: `missing: ${path}` };
@@ -232,6 +234,34 @@ export const checkSignal = async (signal: string, run: Runner, io: SignalIo = {}
       return { signal: s, ok: true, detail: `status ${res.status}${sig.body ? ", body matches" : ""}` };
     }
   }
+};
+
+const REMOTE_RESOLVE = 'p=$1; case $p in "~") p=$HOME;; "~/"*) p=$HOME/${p#??};; esac; case $p in /*) ;; *) p=$PWD/$p;; esac; test -e "$p" && printf %s "$p"';
+
+const checkRemoteFile = async (s: string, sig: Extract<Signal, { kind: "file" }>, exec: Runner, cwd?: string): Promise<Check> => {
+  const at = await exec(["sh", "-c", REMOTE_RESOLVE, "sh", sig.path], cwd ? { cwd } : {});
+  if (at.code === 255) return { signal: s, ok: false, detail: `host unreachable: ${short(at.err)}` };
+  if (at.code !== 0 || !at.out) return { signal: s, ok: false, detail: `missing on host: ${sig.path}` };
+  const path = at.out;
+  if (sig.sha256) {
+    const sum = await exec(["shasum", "-a", "256", path]);
+    const got = sum.out.split(/\s+/)[0] ?? "";
+    if (sum.code !== 0 || got !== sig.sha256) return { signal: s, ok: false, detail: sum.code !== 0 ? `shasum failed: ${short(sum.err)}` : `sha256 ${got.slice(0, 12)}… != ${sig.sha256.slice(0, 12)}…` };
+  }
+  if (sig.json) {
+    const cat = await exec(["cat", path]);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cat.out);
+    } catch {
+      return { signal: s, ok: false, detail: `not JSON on host: ${path}` };
+    }
+    const hit = dig(parsed, sig.json.path);
+    const want = JSON.stringify(sig.json.value);
+    if (!hit.found) return { signal: s, ok: false, detail: `no field .${sig.json.path.join(".")}` };
+    if (JSON.stringify(hit.value) !== want) return { signal: s, ok: false, detail: `.${sig.json.path.join(".")} is ${short(JSON.stringify(hit.value))}, want ${want}` };
+  }
+  return { signal: s, ok: true, detail: `present on host${sig.sha256 ? ", sha256 matches" : ""}${sig.json ? `, .${sig.json.path.join(".")} matches` : ""}` };
 };
 
 export const checkDone = async (done: string, run: Runner, io: SignalIo = {}): Promise<Check[]> => {

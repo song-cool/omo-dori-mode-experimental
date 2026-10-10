@@ -12,6 +12,12 @@ dori launch fix-login --title "Fix the login redirect loop" \
 
 `launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds checks the start: `STARTUP_ERROR` on a known failure (missing module, no API key, rate limit, quota), `STARTUP_OK` only when herdr reports the agent idle or working, `STARTUP_UNCONFIRMED` otherwise. On `STARTUP_ERROR`, relaunch on another model; on `STARTUP_UNCONFIRMED`, look at the pane before doing anything else.
 
+### Lanes on another machine
+
+Add `--host <name>` to run the lane on a machine from `config.hosts` (see `scripts.md`). Check first with `dori can-launch --host <name>`: when it prints `HOLD host <name> unreachable`, the machine is asleep or offline, so queue the work and tell the owner. Pick another agent with `--agent codex` or `--agent claude` when the host defines it.
+
+A remote lane works like a local one from your side: `sync`, `freshness`, `dead-panes`, `claim-done`, `object-done`, `close` and `watch` reach its pane over SSH, and its `command` and `file` signals are checked on that machine in the lane's directory. The lane cannot reach you, so its footer differs: it prints `[REPORT]` lines in its own pane, and it claims done by writing its evidence to `<briefsDir>/<key>.done` on its host. `dori watch` pulls that file, removes it and records the claim; from there the normal done window applies.
+
 Write the brief like a careful prompt:
 
 - open with the keywords you would type yourself (for example `ulw set goal and work`);
@@ -31,7 +37,7 @@ Write the brief like a careful prompt:
 | `file <path> [sha256=<hex>] [json:.a.b=<json value>]` | the file exists, its sha256 matches, and the JSON field equals the value |
 | `url <http(s) url> [status=200] [body~"regex"]` | a GET returns that status, and the body matches if a regex is given |
 
-The last three are for work that never lands as a PR: a local setup, a QA pass, a running service. Write the check so that it can fail. `command ["bun","test"] stdout~" 0 fail"` is a real check, while `command ["true"]` checks nothing. The watcher runs commands itself, in the lane's directory, as a plain argv with no shell. They have a 2-minute limit. It never trusts the lane's own report that something passed. Relative file paths resolve from the lane's directory, and `~` is your home. JSON values compare as JSON, so `json:.n=3` and `json:.n="3"` are different checks.
+The last three are for work that never lands as a PR: a local setup, a QA pass, a running service. Write the check so that it can fail. `command ["bun","test"] stdout~" 0 fail"` is a real check, while `command ["true"]` checks nothing. The watcher runs commands itself, in the lane's directory, as a plain argv with no shell. They have a 2-minute limit. It never trusts the lane's own report that something passed. Relative file paths resolve from the lane's directory, and `~` is your home (the host's home for a remote lane, where `command` and `file` run too). JSON values compare as JSON, so `json:.n=3` and `json:.n="3"` are different checks.
 
 Example for a QA-only lane:
 
@@ -49,6 +55,7 @@ One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file 
 |---|---|
 | `thread` | where its updates go, as `platform:thread` (or `none`) |
 | `pane`, `tab` | its herdr location |
+| `host`, `claimFile` | for a remote lane: the `config.hosts` name it runs on, and the file it writes its done claim to |
 | `session` | the agent's own session id, so a closed job can be reopened later |
 | `status` | `working`, `done-claimed`, `verified-done`, `not-done`, `closed` |
 | `claim`, `objection`, `history` | what was claimed, what was objected, every status change |

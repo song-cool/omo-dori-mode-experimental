@@ -98,5 +98,5 @@ Real work runs in its own herdr tab, called a lane. The protocol, with the reaso
 | `dori dead-panes` | report agent panes that stopped |
 | `dori guard` | host load, memory, disk and pane-count alerts |
 | `dori heavy <label> -- <cmd>` | run a heavy command only when a slot is free and load is low |
-| `dori can-launch` | is there room for a new lane? exit 4 with the reasons if not |
+| `dori can-launch [--host NAME]` | is there room for a new lane (here, or on a `hosts` machine)? exit 4 with the reasons if not |
 | `dori send` / `dori presence` / `dori transcribe` | messenger utilities: post or edit on Slack, Telegram or Discord; stay shown online; voice note to text |
