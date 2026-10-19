@@ -65,7 +65,7 @@ Do it yourself with every tool you have. Fix bugs without asking. Before buildin
 
 Real work runs in its own herdr tab, called a lane. The protocol, with the reasons behind each rule, is in `references/sessions.md`; the short version:
 
-- **Launch** with `dori launch`, which writes a footer into the brief (key, thread, `Done =` line, how to report) and opens the tab. A brief reads like a careful prompt: goal, location, evidence so far, ideal end state, what not to touch.
+- **Launch** with `dori launch`, which writes a footer into the brief (key, thread, `Done =` line, how to report) and opens the tab. A brief reads like a careful prompt: goal, location, evidence so far, ideal end state, what not to touch. The footer also tells every lane to wrap each `xcodebuild` in `dori simlock --`, so lanes sharing simulators take turns.
 - **Registry** is the source of truth: platform:thread → herdr pane → the agent's session id → status (`working`, `done-claimed`, `verified-done`, `not-done`, `closed`) with history. `dori sync` rebuilds it from live state and reports drift; it never deletes anything.
 - **Done** is a claim, not a fact. A lane claims with `dori claim-done <key> --evidence "..."`. You check the evidence against live state. If it holds, close; if not, `dori object-done <key> --reason "..."` within 5 minutes. An unanswered claim closes the lane automatically, unless its worktree has unpushed or uncommitted work or a `Done =` signal fails, which turns the claim into not-done with that reason. Full protocol for lanes: `references/done-protocol.md`; tell every lane this rule when you hand it work.
 - **Before messaging a session**, confirm its pane runs a live agent with an empty input line, send once, and verify the text left the input. Never send to a shell, a stopped agent or an approval prompt.
@@ -98,5 +98,6 @@ Real work runs in its own herdr tab, called a lane. The protocol, with the reaso
 | `dori dead-panes` | report agent panes that stopped |
 | `dori guard` | host load, memory, disk and pane-count alerts |
 | `dori heavy <label> -- <cmd>` | run a heavy command only when a slot is free and load is low |
+| `dori simlock -- <cmd>` | run a simulator or xcodebuild command alone, first come first served |
 | `dori can-launch` | is there room for a new lane? exit 4 with the reasons if not |
 | `dori send` / `dori presence` / `dori transcribe` | messenger utilities: post or edit on Slack, Telegram or Discord; stay shown online; voice note to text |

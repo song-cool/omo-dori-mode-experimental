@@ -124,6 +124,7 @@ The watcher runs each check itself when it closes the lane, with no shell, and n
 | `dori dead-panes [--loop MIN]` | report agent panes that stopped |
 | `dori guard [--loop MIN]` | alert on load, memory, disk and pane count |
 | `dori heavy <label> -- <cmd>` | run a build or test suite only when a slot is free and load is low |
+| `dori simlock [--label L] -- <cmd>` | run a simulator or `xcodebuild` command alone, first come first served, so lanes sharing a simulator take turns |
 
 Text sent to a pane always goes as one argument, never through a shell string, and the CLI reports each send as delivered or unconfirmed.
 

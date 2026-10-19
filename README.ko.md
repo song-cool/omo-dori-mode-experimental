@@ -124,6 +124,7 @@ watcher는 레인을 닫을 때 셸 없이 이 확인을 직접 다시 돌리고
 | `dori dead-panes [--loop MIN]` | 멈춘 에이전트 pane 보고 |
 | `dori guard [--loop MIN]` | 부하, 메모리, 디스크, pane 수 경고 |
 | `dori heavy <label> -- <cmd>` | 슬롯이 비고 부하가 낮을 때만 빌드나 테스트 실행 |
+| `dori simlock [--label L] -- <cmd>` | 시뮬레이터나 `xcodebuild` 명령을 한 번에 하나씩, 먼저 온 순서대로 실행. 시뮬레이터를 같이 쓰는 레인이 차례를 지킴 |
 
 pane에 보내는 글은 항상 인자 하나로 넘기고 셸 문자열을 거치지 않습니다. 전송 결과는 전달됨 또는 미확인으로 보고합니다.
 

@@ -20,7 +20,7 @@ Needs: bun 1.3+, herdr, git, and the GitHub CLI (`gh`) for `merged`/`closed` sig
 
 | Field | Default | Used by |
 |---|---|---|
-| `stateDir` | `~/.dori/state` | registry, heavy slots |
+| `stateDir` | `~/.dori/state` | registry, heavy slots, `simlock/` tickets |
 | `laneWorkspace` | current workspace | `launch` |
 | `workspaces` | all | `sync`, `dead-panes` |
 | `ignorePanes`, `leadPane` | none | panes the sweeps skip; `leadPane` is also where lanes report |
@@ -58,7 +58,7 @@ Every module takes its HTTP, clock and timers as arguments. That is how the test
 ## Commands
 
 ### `dori launch <key> --title T --brief FILE --done "..." [--thread REF] [--model M] [--cwd DIR]`
-Opens a lane: appends the footer to the brief, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane, `STARTUP_OK` only when herdr reports the agent idle or working, and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`.
+Opens a lane: appends the footer to the brief, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane, `STARTUP_OK` only when herdr reports the agent idle or working, and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`. An agent that herdr reports idle at 20 seconds is checked again 40 seconds later; still idle there (it never picked up the launch prompt) means it is sent `Read your brief at <path>` once and the launch also prints `BRIEF_NUDGED ...` with the delivery. Only herdr's agent status decides this, never the screen.
 
 ### `dori adopt <key> --pane ID --title T --brief FILE --done "..." [--thread REF]`
 Registers a lane that is already running.
@@ -118,3 +118,6 @@ Runs `hooks.transcribe` and prints the transcript. A failed or empty transcripti
 
 ### `dori heavy <label> -- <command ...>`
 Waits until load is under `heavyMaxLoad` and one of `heavySlots` is free, then runs the command and frees the slot when it exits. A slot held by a process that no longer exists (or a zombie) is taken over. Use it for full builds and test suites. Installs, focused tests and git do not need it.
+
+### `dori simlock [--label L] -- <command ...>`
+Runs one simulator command at a time across all lanes, first come first served. Each caller writes a ticket to `<stateDir>/simlock/`; the oldest ticket runs, and the others print `SIMLOCK waiting: position N of M (running: pid P label)` to stderr whenever their place changes. A ticket whose process is gone is removed, so a crashed run never blocks the queue. The ticket is removed when the command exits or the wrapper is interrupted; the exit code is the command's. Every lane footer tells lanes to wrap each `xcodebuild` (and `simctl` boot/install/launch) in it.

@@ -1,6 +1,6 @@
 import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { readScreen, statusLookup } from "./panes.ts";
+import { readScreen, sendVerified, statusLookup } from "./panes.ts";
 import { LANE_KEY, type Lane } from "./registry.ts";
 import { iso } from "./run.ts";
 import { doneSyntaxErrors } from "./signals.ts";
@@ -33,6 +33,7 @@ export const footer = (lane: Lane, leadPane: string): string => [
   `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
   `- Report to the lead at each milestone: [REPORT] ${lane.key} | <milestone|blocker|question|done> | <what, with links>, sent to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string.`,
   `- When done: dori claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>". See references/done-protocol.md.`,
+  `- Simulators are shared by every lane: wrap every xcodebuild (and simctl boot/install/launch) in dori simlock -- <command ...>, for example dori simlock -- xcodebuild test -scheme App -destination id=<UDID>. It waits its turn, first come first served, and prints its place in the queue.`,
   "",
 ].join("\n");
 
@@ -43,7 +44,7 @@ export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly 
   return lane;
 };
 
-export const launchLane = async (deps: FlowDeps, input: LaunchInput): Promise<{ readonly lane: Lane; readonly startup: string }> => {
+export const launchLane = async (deps: FlowDeps, input: LaunchInput): Promise<{ readonly lane: Lane; readonly startup: string; readonly nudge?: string }> => {
   await validateLaunch(deps, input);
   const model = input.model ?? deps.config.defaultModel;
   const cwd = input.cwd ?? deps.config.defaultCwd;
@@ -65,7 +66,16 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput): Promise<{ 
   const bad = STARTUP_FAILURE.exec(screen);
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad[0]}` };
   const { status, error } = await statusLookup(deps.run, pane);
-  if (status === "idle" || status === "working") return { lane, startup: `STARTUP_OK ${input.key} ${pane}` };
+  if (status === "working") return { lane, startup: `STARTUP_OK ${input.key} ${pane}` };
+  if (status === "idle") {
+    const startup = `STARTUP_OK ${input.key} ${pane}`;
+    // An agent sometimes sits idle with the launch prompt unread. Idle on two status reads 40 s apart, never working in
+    // between as far as herdr reports, means it has not started: one plain nudge gets it going. The screen is not consulted.
+    await deps.clock.sleep(40_000);
+    if ((await statusLookup(deps.run, pane)).status !== "idle") return { lane, startup };
+    const delivery = await sendVerified(deps.run, deps.clock, pane, `Read your brief at ${input.brief}`);
+    return { lane, startup, nudge: `BRIEF_NUDGED ${input.key} ${pane}: still idle 60 s after start, sent "Read your brief at ${input.brief}" (delivery ${delivery})` };
+  }
   const why = error ? `status lookup failed: ${error}` : `no ready agent status (${status ?? "none"})`;
   return { lane, startup: `STARTUP_UNCONFIRMED ${input.key} ${pane}: ${why}; last lines: ${lastLines(screen)}` };
 };

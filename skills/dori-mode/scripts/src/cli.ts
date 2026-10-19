@@ -11,6 +11,7 @@ import { adoptLane, launchLane, LaunchError } from "./launch.ts";
 import { pauseLane, resumeLane } from "./pause.ts";
 import { Registry, statusOf } from "./registry.ts";
 import { realClock, run } from "./run.ts";
+import { releaseTicket, takeTicket, waitTurn } from "./simlock.ts";
 import { syncRegistry } from "./sync.ts";
 import { canLaunch } from "./routing.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
@@ -38,6 +39,7 @@ const USAGE = `dori <command> [options]
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
   heavy <label> -- <command ...>       run a heavy command when a slot is free and load is low
+  simlock [--label L] -- <command ...> run a simulator/xcodebuild command alone, first come first served
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
@@ -63,7 +65,7 @@ const flags = parseArgs({
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
     model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
-    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
+    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, label: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -95,6 +97,7 @@ try {
       const r = await launchLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd") });
       console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}`);
       console.log(r.startup);
+      if (r.nudge) console.log(r.nudge);
       process.exit(r.startup.startsWith("STARTUP_OK") ? 0 : 3);
     }
     case "adopt": {
@@ -156,6 +159,22 @@ try {
       await every(loopMin, async () => {
         for (const line of guardTick(await sampleHost(run), config.guard, state)) console.log(line);
       });
+      break;
+    }
+    case "simlock": {
+      const sep = rest.indexOf("--");
+      const cmd = sep >= 0 ? rest.slice(sep + 1) : [];
+      if (!cmd.length) die("usage: dori simlock [--label L] -- <command ...>");
+      const lockDeps = { dir: `${config.stateDir}/simlock`, clock: realClock, alive: pidAlive, pid: process.pid, log: (l: string) => console.error(l) };
+      const ticket = takeTicket(lockDeps, opt("label") ?? cmd.join(" ").slice(0, 80));
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => { releaseTicket(ticket); process.exit(130); });
+      try {
+        await waitTurn(lockDeps, ticket);
+        const child = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
+        process.exitCode = await child.exited;
+      } finally {
+        releaseTicket(ticket);
+      }
       break;
     }
     case "heavy": {

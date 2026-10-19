@@ -124,6 +124,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 | `dori dead-panes [--loop MIN]` | 报告已停止的智能体 pane |
 | `dori guard [--loop MIN]` | 负载、内存、磁盘和 pane 数量告警 |
 | `dori heavy <label> -- <cmd>` | 只在有空闲槽位且负载低时运行构建或测试 |
+| `dori simlock [--label L] -- <cmd>` | 一次只运行一个模拟器或 `xcodebuild` 命令，先到先得，共用模拟器的 lane 依次轮流 |
 
 发给 pane 的文字总是作为一个参数传入，从不经过 shell 字符串，并把每次发送报告为已送达或未确认。
 
