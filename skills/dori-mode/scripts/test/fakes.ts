@@ -19,18 +19,22 @@ export type World = {
   onEnterStatus?: string;
   /** Screens returned by successive reads; falls back to `screen` when empty. */
   screens?: string[];
+  /** Per-pane screens that take precedence over `screen` / `screens` (the lead pane reads "❯ " by default). */
+  paneScreens: Record<string, string>;
   calls: string[][];
 };
 
 export const WT = "/repo/.wt/demo-lane";
 
-export const newWorld = (): World => ({ prState: "MERGED", issueState: "CLOSED", aheadCount: "0", dirty: "", stuckReads: 0, screen: "❯ ", panes: [], calls: [] });
+export const newWorld = (): World => ({ prState: "MERGED", issueState: "CLOSED", aheadCount: "0", dirty: "", stuckReads: 0, screen: "❯ ", paneScreens: { "lead:p1": "❯ " }, panes: [], calls: [] });
 
 export const fakeRunner = (w: World): Runner => async (argv) => {
   w.calls.push([...argv]);
   const ok = (out = ""): Ran => ({ code: 0, out, err: "" });
   const [cmd, a1, a2] = argv;
   if (cmd === "herdr" && a1 === "pane" && a2 === "read") {
+    const own = w.paneScreens[argv[3] ?? ""];
+    if (own !== undefined) return ok(own);
     if (w.stuckReads > 0) {
       w.stuckReads--;
       return ok("❯ [LEAD] stuck text still here");

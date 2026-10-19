@@ -111,6 +111,21 @@ test("a pane that was already working cannot show a change, so the send is uncon
   expect(world.calls.filter((c) => c[2] === "send-keys")).toHaveLength(1);
 });
 
+test("a Codex pane that herdr reports as working gets Tab to queue the text, never Enter", async () => {
+  world.panes = [{ pane_id: "w:p3", workspace_id: "w", agent: "codex", agent_status: "working" }];
+  world.paneScreens["w:p3"] = "• Working (41s • esc to interrupt)\n› [LEAD] please post progress\n  tab to queue message";
+  expect(await sendVerified(at(T0).run, at(T0).clock, "w:p3", "[LEAD] please post progress")).toBe("unconfirmed");
+  expect(world.calls.filter((c) => c[2] === "send-keys").map((c) => c[4])).toEqual(["tab"]);
+});
+
+test("a Codex screen that only looks busy does not change the key: an idle Codex pane gets Enter", async () => {
+  world.panes = [{ pane_id: "w:p3", workspace_id: "w", agent: "codex", agent_status: "idle" }];
+  world.paneScreens["w:p3"] = "• Working (41s • esc to interrupt)\n  tab to queue message";
+  world.onEnterStatus = "working";
+  expect(await sendVerified(at(T0).run, at(T0).clock, "w:p3", "[LEAD] please report")).toBe("delivered");
+  expect(world.calls.filter((c) => c[2] === "send-keys").map((c) => c[4])).toEqual(["enter"]);
+});
+
 test("text with a backtick never reaches a pane", async () => {
   await expect(sendVerified(at(T0).run, at(T0).clock, "w:p1", "run `rm -rf`")).rejects.toBeInstanceOf(UnsafeTextError);
   expect(world.calls).toHaveLength(0);

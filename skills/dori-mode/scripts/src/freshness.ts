@@ -1,3 +1,6 @@
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { checkPausedLane } from "./pause.ts";
@@ -23,9 +26,52 @@ export type SweepAct = { readonly kind: "nudged" | "posted" | "no-report" | "pen
 
 const lastHeard = (lane: Lane): number => lane.lastReplyAt ?? Date.parse(lane.openedAt);
 
+/** Persisted inbound reports, one `<ISO time>\t<[REPORT] line>` per line. Any tool may append to it. */
+export const inboundLog = (stateDir: string, key: string): string => join(stateDir, "inbound", `${key}.log`);
+
+const lastInbound = (path: string): { readonly at: number; readonly line: string } | null => {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const last = text.trimEnd().split("\n").at(-1) ?? "";
+  const tab = last.indexOf("\t");
+  const at = tab > 0 ? Date.parse(last.slice(0, tab)) : Number.NaN;
+  return Number.isNaN(at) ? null : { at, line: last.slice(tab + 1) };
+};
+
+/**
+ * Lanes are told to send their [REPORT] lines to the lead pane, so those lines usually never appear in the lane's own pane.
+ * A lead-pane line for this lane counts as hearing from it once it is still the last one on the next tick and differs from
+ * the last persisted entry; it is then appended to the inbound log. A log entry newer than the last heard time counts too.
+ */
+const noteInbound = async (deps: FlowDeps, lane: Lane, leadScreen: string | null): Promise<Lane> => {
+  const path = inboundLog(deps.config.stateDir, lane.key);
+  const prev = lastInbound(path);
+  const now = deps.clock.now();
+  let current = lane;
+  if (leadScreen !== null) {
+    const seen = lastReportLine(leadScreen, lane.key);
+    if (seen && seen === lane.lastSeenLeadReport && seen !== prev?.line) {
+      mkdirSync(join(deps.config.stateDir, "inbound"), { recursive: true });
+      appendFileSync(path, `${new Date(now).toISOString()}\t${seen}\n`);
+      current = { ...current, lastReplyAt: now };
+    }
+    if ((seen ?? undefined) !== lane.lastSeenLeadReport) current = { ...current, lastSeenLeadReport: seen ?? undefined };
+  }
+  if (current.lastReplyAt === lane.lastReplyAt && prev && prev.at > lastHeard(lane)) current = { ...current, lastReplyAt: Math.min(prev.at, now) };
+  if (current !== lane) await deps.registry.write(current);
+  return current;
+};
+
 export const freshnessTick = async (deps: FlowDeps, home: string): Promise<SweepAct[]> => {
   const acts: SweepAct[] = [];
   const now = deps.clock.now();
+  let leadScreen: string | null | undefined;
+  const readLead = async (): Promise<string | null> =>
+    (leadScreen ??= deps.config.leadPane ? await readScreen(deps.run, deps.config.leadPane, 400).catch(() => null) : null);
   for (const lane of await deps.registry.open()) {
     if (statusOf(lane) === "paused") {
       const checked = await checkPausedLane(deps, lane);
@@ -37,9 +83,9 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
       continue;
     }
     if (statusOf(lane) !== "working" || !lane.pane) continue;
-    const heard = lastHeard(lane);
+    let current = await noteInbound(deps, lane, await readLead());
+    const heard = lastHeard(current);
     const silentMin = Math.round((now - heard) / 60_000);
-    let current = lane;
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {
       const delivery = await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] your work thread has had no update for ${silentMin} min. Post a 1-2 sentence progress line (done since last, next) and keep its status true.`);
       current = { ...current, lastNudgeAt: now };
@@ -48,12 +94,12 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     }
     const hook = deps.config.hooks.threadReply;
     if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
-      const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
+      const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key) ?? lastInbound(inboundLog(deps.config.stateDir, lane.key))?.line ?? null;
       // The two reads are a full loop interval apart: a line counts only once it is still there on the next tick.
       const seenBefore = current.lastSeenReport;
       current = { ...current, lastSeenReport: report ?? undefined };
       let hold: { kind: SweepAct["kind"]; detail: string } | null = null;
-      if (!report) hold = { kind: "no-report", detail: "pane has no [REPORT] line" };
+      if (!report) hold = { kind: "no-report", detail: "no [REPORT] line in the lane pane or the inbound log" };
       else if (report !== seenBefore) hold = { kind: "pending-report", detail: "a new [REPORT] line; posting once it holds on the next tick" };
       else if (report === current.lastPostedReport) hold = { kind: "stale-report", detail: "the last [REPORT] line was already posted" };
       if (hold) {

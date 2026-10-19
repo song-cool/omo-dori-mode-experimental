@@ -34,6 +34,8 @@ export type Lane = {
   readonly lastPostedReport?: string;
   /** The [REPORT] line seen on the previous freshness tick (a line is posted only once it holds across two ticks). */
   readonly lastSeenReport?: string;
+  /** The lane's [REPORT] line seen in the lead pane on the previous freshness tick (it counts once it holds across two). */
+  readonly lastSeenLeadReport?: string;
   /** The last held-back freshness outcome, so a quiet lane logs each state change once, not every tick. */
   readonly lastFreshnessNote?: string;
   /** A paused lane whose pane read working on the previous freshness tick (two in a row is reported, never a resume). */

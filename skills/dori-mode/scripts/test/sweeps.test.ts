@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
@@ -38,6 +38,40 @@ test("a lane silent past the nudge time is nudged once, then its last report is 
   expect(call?.[1]).toBe("chat:team/9");
   expect(call?.[2]).toContain("tests green on ~/repo, PR open");
   expect(sent(world)).toHaveLength(1);
+});
+
+test("a report the lane sent to the lead pane counts once it holds on the next tick, and the inbound log counts too", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write(working);
+  world.screen = "tool output with no report\n❯ ";
+  world.paneScreens["lead:p1"] = "lead noise\n[REPORT] quiet-lane | milestone | step 3 of 5 done\n❯ ";
+  // first sighting is not yet news; the second, a tick later, is
+  expect(await freshnessTick(deps(T0 + 5 * MIN), "/home/test")).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0);
+  expect(await freshnessTick(deps(T0 + 10 * MIN), "/home/test")).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0 + 10 * MIN);
+  expect(readFileSync(join(state.dir, "inbound", "quiet-lane.log"), "utf8")).toContain("step 3 of 5 done");
+  // the same lead-pane line is not news again: the lane goes silent, is nudged, and the logged report is posted
+  expect((await freshnessTick(deps(T0 + 26 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
+  expect((await freshnessTick(deps(T0 + 31 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["pending-report"]);
+  const posted = await freshnessTick(deps(T0 + 36 * MIN), "/home/test");
+  expect(posted.map((a) => a.kind)).toEqual(["posted"]);
+  expect(posted[0]?.detail).toContain("step 3 of 5 done");
+  // a newer entry appended to the inbound log by any tool makes the lane fresh again
+  world.paneScreens["lead:p1"] = "❯ ";
+  writeFileSync(join(state.dir, "inbound", "quiet-lane.log"), `${new Date(T0 + 50 * MIN).toISOString()}\t[REPORT] quiet-lane | milestone | PR open\n`, { flag: "a" });
+  expect(await freshnessTick(deps(T0 + 60 * MIN), "/home/test")).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0 + 50 * MIN);
+});
+
+test("a lead-pane line seen on one tick only never counts as hearing from the lane", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir);
+  await deps(T0).registry.write(working);
+  world.paneScreens["lead:p1"] = "[REPORT] quiet-lane | milestone | flashed once\n❯ ";
+  expect(await freshnessTick(deps(T0 + 5 * MIN), "/home/test")).toEqual([]);
+  world.paneScreens["lead:p1"] = "❯ ";
+  expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0);
 });
 
 test("a stopped agent pane is reported once per hour and the lead pane is never reported", async () => {
