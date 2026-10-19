@@ -33,6 +33,9 @@ Needs: bun 1.3+, herdr, git, and the GitHub CLI (`gh`) for `merged`/`closed` sig
 | `deadPanePatterns` | `has stopped`, `no suitable jobs` | `dead-panes` |
 | `guard` | load 150/80, 20% memory, 50 GB disk, 20 panes | `guard` |
 | `hooks.threadReply`, `hooks.threadDone` | none | `freshness`, `close` |
+| `hooks.threadStatus` | none | `close`: sets the thread's status (argv with `{thread}`, `{status}`, `{key}`; `{status}` is `done`); a first output line starting `KEPT` means the hook left it as it was, for example because the thread waits on an owner decision |
+| `worktreeRoots` | none | `close`: directories of shared worktrees; a subdirectory whose name contains the lane key counts as the lane's own |
+| `leftoverKeep` | none | `close`: regexes for commands the leftover cleanup never kills (a messenger gateway, a watchdog); herdr and dori's own sweeps are always kept |
 | `hooks.transcribe` | none | `transcribe` (argv with `{file}`, prints the text) |
 
 Hooks are argv templates for your messenger CLI. `{thread}`, `{text}` and `{key}` are filled into each argument separately, so the text stays one argument whatever it contains.
@@ -70,7 +73,9 @@ Prints `key | thread | pane | session | status` for every open lane and every un
 The two halves of the done flow. Both message the lane's pane and check that Enter registered.
 
 ### `dori close <key> [--note TEXT]`
-Closes a lane now. Refuses (exit 2) unless every `Done =` signal reads back live. On success it marks the thread done through `hooks.threadDone`, closes the tab, and removes the lane's worktrees with a plain `git worktree remove`, which refuses a dirty worktree.
+Closes a lane now. Refuses (exit 2) unless every `Done =` signal reads back live. On success it marks the thread done through `hooks.threadDone`, sets its status through `hooks.threadStatus` (a hook that answers `KEPT ...` is reported as kept), closes the tab, and removes the lane's worktrees with a plain `git worktree remove`, which refuses a dirty worktree.
+
+Before removing worktrees it cleans up what the lane left running, such as a dev server or a watcher that outlived the lane: processes that were in the lane pane's process tree (same pid and command), or whose cwd is inside the lane's worktrees, a `worktreeRoots` directory named for the lane, or the lane's cwd when no other pane or lane shares it. Processes under any other pane, the closer's own ancestry, another open lane's directory, herdr, dori's sweeps and `leftoverKeep` commands are never touched; if any pane's processes cannot be read, the scan is skipped instead of guessing. Each kill (SIGTERM, then SIGKILL if it survives) is logged in the receipt with its listening ports. Simulators booted after the lane launched are shut down only when no other lane is open.
 
 ### `dori pause <key> [--note TEXT]` / `dori resume <key> [--note TEXT]`
 `pause` is for when the owner said wait. It works on a `working` or `not-done` lane. It sends `/goal pause` to the lane's pane, then reads the screen back until the goal command's own line appears on a line of its own: `Goal paused`, or `cannot update goal: no goal exists`, since a lane with no goal has nothing to continue. Only then does it mark the lane `paused` (recorded in its history) and send Escape if a turn is running. The goal is paused first, so stopping the turn cannot hand off to a goal continuation. If the line does not appear, or the send fails, the lane is left as it was and the command prints `PAUSE_UNVERIFIED` and exits 3.

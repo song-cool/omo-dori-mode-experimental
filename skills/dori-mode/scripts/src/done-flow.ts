@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { type DoriConfig, fill } from "./config.ts";
 import { type Lane, type Registry, statusOf, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
-import { sendVerified } from "./panes.ts";
+import { ancestors, bootedSims, cwdTable, descendants, keptCommand, killLeftovers, listeningPorts, matchingWorktreeDirs, overlaps, pickLeftovers, privateCwd, type Proc, psTable, shellPid, simctl } from "./leftovers.ts";
+import { listPanes, type Pane, sendVerified } from "./panes.ts";
 import { checkDone, type SignalIo } from "./signals.ts";
 
 export type FlowDeps = {
@@ -13,6 +14,8 @@ export type FlowDeps = {
   readonly config: DoriConfig;
   readonly exists?: (path: string) => boolean;
   readonly signalIo?: SignalIo;
+  readonly selfPid?: number;
+  readonly listDir?: (dir: string) => string[];
 };
 
 const signalIo = (deps: FlowDeps, lane: Lane): SignalIo => ({ cwd: lane.cwd ?? deps.config.defaultCwd, ...deps.signalIo });
@@ -64,6 +67,47 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
   return reasons;
 };
 
+const laneTree = async (deps: FlowDeps, lane: Lane): Promise<Proc[]> => {
+  if (!lane.pane) return [];
+  const table = await psTable(deps.run);
+  const shell = await shellPid(deps.run, lane.pane);
+  if (!table || shell === null) return [];
+  const ids = descendants(table, [shell]);
+  return table.filter((p) => ids.has(p.pid));
+};
+
+// Kills what the lane's children left running (dev servers, watchers) and shuts down the simulators it booted.
+// Anything in another pane's process tree, the closer's own ancestry, or another open lane's directory is never touched.
+const cleanupLeftovers = async (deps: FlowDeps, lane: Lane, before: readonly Proc[], worktrees: readonly string[]): Promise<string[]> => {
+  const table = await psTable(deps.run);
+  if (!table) return ["leftover scan skipped: ps failed"];
+  let panes: Pane[];
+  try {
+    panes = (await listPanes(deps.run)).filter((p) => p.pane_id !== lane.pane);
+  } catch {
+    return ["leftover scan skipped: herdr pane list failed"];
+  }
+  const shells: number[] = [];
+  for (const p of panes) {
+    const shell = await shellPid(deps.run, p.pane_id);
+    if (shell === null) return [`leftover scan skipped: could not read the processes of pane ${p.pane_id}`];
+    shells.push(shell);
+  }
+  const others = (await deps.registry.open()).filter((l) => l.key !== lane.key);
+  const protectedPids = new Set([...descendants(table, shells), ...ancestors(table, deps.selfPid ?? process.pid)]);
+  const shared = [deps.config.defaultCwd, ...others.map((l) => l.cwd ?? ""), ...panes.map((p) => p.cwd ?? "")].filter(Boolean);
+  const roots = [...worktrees, ...matchingWorktreeDirs(deps.config.worktreeRoots, lane.key, others.map((l) => l.key), deps.listDir), ...privateCwd(lane.cwd, shared)].filter((r) => !others.some((l) => l.cwd && overlaps(r, l.cwd)));
+  const procs = pickLeftovers({ table, cwds: await cwdTable(deps.run), laneTree: before, roots, protectedPids, kept: keptCommand(deps.config.leftoverKeep) });
+  const lines = await killLeftovers(deps.run, deps.clock, procs, await listeningPorts(deps.run));
+  if (lane.simsAtLaunch) {
+    const atLaunch = lane.simsAtLaunch;
+    const mine = ((await bootedSims(deps.run)) ?? []).filter((u) => !atLaunch.includes(u));
+    if (mine.length && others.length) lines.push(`simulators kept, other lanes are running: ${mine.join(", ")}`);
+    else for (const u of mine) lines.push((await simctl(deps.run, ["shutdown", u])).code === 0 ? `simulator ${u} shut down` : `simulator ${u} not shut down`);
+  }
+  return lines.length ? lines : ["no leftover processes"];
+};
+
 export const closeLane = async (deps: FlowDeps, lane: Lane, note: string): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
   const exists = deps.exists ?? existsSync;
   const checks = await checkDone(lane.done, deps.run, signalIo(deps, lane));
@@ -75,10 +119,20 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string): Promi
     const r = await deps.run(fill(hook, { thread: lane.thread, text: note, key: lane.key }));
     cleanup.push(r.code === 0 ? "thread marked done" : `thread hook failed: ${r.err.slice(0, 160)}`);
   }
+  const statusHook = deps.config.hooks.threadStatus;
+  if (statusHook && lane.thread !== "none") {
+    // The hook may decline (for example, the thread is waiting on an owner decision): a first line starting KEPT says so.
+    const r = await deps.run(fill(statusHook, { thread: lane.thread, status: "done", key: lane.key }));
+    const said = r.out.split("\n")[0] ?? "";
+    cleanup.push(r.code !== 0 ? `thread status hook failed: ${(r.err || r.out).slice(0, 160)}` : said.startsWith("KEPT") ? `thread status kept: ${said.slice(4).trim().slice(0, 120)}` : `thread status: ${said.slice(0, 120)}`);
+  }
+  const before = await laneTree(deps, lane);
   if (lane.tab) cleanup.push((await deps.run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab} closed` : `tab ${lane.tab} not closed`);
   else if (lane.pane) cleanup.push((await deps.run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane} closed` : `pane ${lane.pane} not closed`);
   const root = lane.cwd ?? deps.config.defaultCwd;
-  for (const wt of (await discoverWorktrees(lane, deps.run, [deps.config.defaultCwd])).filter(exists)) {
+  const worktrees = await discoverWorktrees(lane, deps.run, [deps.config.defaultCwd]);
+  cleanup.push(...(await cleanupLeftovers(deps, lane, before, worktrees)));
+  for (const wt of worktrees.filter(exists)) {
     const r = await deps.run(["git", "-C", root, "worktree", "remove", wt]);
     cleanup.push(r.code === 0 ? `worktree ${wt} removed` : `worktree ${wt} kept: ${r.err.slice(0, 120)}`);
   }

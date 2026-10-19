@@ -21,6 +21,8 @@ export type Lane = {
   readonly cwd?: string;
   readonly model?: string;
   readonly worktrees?: readonly string[];
+  /** Simulators already booted when the lane launched; close shuts down only the ones booted after. */
+  readonly simsAtLaunch?: readonly string[];
   readonly status?: LaneStatus;
   readonly claim?: Claim;
   readonly objection?: Objection;

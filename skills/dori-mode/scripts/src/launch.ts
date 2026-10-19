@@ -1,5 +1,6 @@
 import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
+import { bootedSims } from "./leftovers.ts";
 import { readScreen, statusLookup } from "./panes.ts";
 import { LANE_KEY, type Lane } from "./registry.ts";
 import { iso } from "./run.ts";
@@ -58,7 +59,8 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput): Promise<{ 
   const tab = made.tab_id ?? made.root_pane.tab_id;
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${input.brief} in full. You are the ${input.key} lane; report as the brief's footer says.`;
   await deps.run(["herdr", "pane", "run", pane, fill(deps.config.agentCommand, { model, prompt }).map(quoteForPane).join(" ")]);
-  const lane: Lane = { ...draft, pane, ...(tab ? { tab } : {}) };
+  const sims = await bootedSims(deps.run);
+  const lane: Lane = { ...draft, pane, ...(tab ? { tab } : {}), ...(sims ? { simsAtLaunch: sims } : {}) };
   await deps.registry.write(lane);
   await deps.clock.sleep(20_000);
   const screen = await readScreen(deps.run, pane, 40);

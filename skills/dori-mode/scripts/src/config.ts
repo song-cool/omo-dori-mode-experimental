@@ -6,6 +6,7 @@ export type ArgvTemplate = readonly string[];
 export type Hooks = {
   readonly threadReply?: ArgvTemplate;
   readonly threadDone?: ArgvTemplate;
+  readonly threadStatus?: ArgvTemplate;
   readonly transcribe?: ArgvTemplate;
 };
 
@@ -34,6 +35,8 @@ export type DoriConfig = {
   readonly heavySlots: number;
   readonly heavyMaxLoad: number;
   readonly deadPanePatterns: readonly string[];
+  readonly worktreeRoots: readonly string[];
+  readonly leftoverKeep: readonly string[];
   readonly guard: GuardThresholds;
   readonly hooks: Hooks;
 };
@@ -55,6 +58,8 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   heavySlots: 1,
   heavyMaxLoad: 80,
   deadPanePatterns: ["has stopped", "no suitable jobs"],
+  worktreeRoots: [],
+  leftoverKeep: [],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},
 });
